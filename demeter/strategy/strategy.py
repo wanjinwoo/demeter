@@ -1,10 +1,13 @@
 from decimal import Decimal
-from datetime import datetime
 from typing import Union
 
-from demeter import PositionInfo, BaseAction, AddLiquidityAction, SellAction, BuyAction, CollectFeeAction, \
-    RemoveLiquidityAction, RowData, Line, Lines, Broker
 import pandas as pd
+
+from .trigger import Trigger
+from .._typing import PositionInfo, BaseAction, AddLiquidityAction, SellAction, BuyAction, CollectFeeAction, \
+    RemoveLiquidityAction, RowData
+from ..broker import Broker
+from ..data_line import Lines, Line
 
 
 class Strategy(object):
@@ -16,6 +19,7 @@ class Strategy(object):
         self.broker: Broker = None
         self.data: Lines = None
         self.number_format = ".8g"
+        self.triggers: [Trigger] = []
 
     def initialize(self):
         """

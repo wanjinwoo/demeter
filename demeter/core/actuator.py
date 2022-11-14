@@ -1,15 +1,17 @@
 import logging
-from .. import PoolStatus
-from ..data_line import Lines
-from ..broker import Broker, PoolBaseInfo
-from .._typing import AccountStatus, BarStatusNames, BaseAction, Asset, ZelosError, TokenInfo, ActionTypeEnum, \
-    EvaluatingIndicator, RowData
-from ..strategy import Strategy
 from datetime import date, timedelta, datetime
-from .evaluating_indicator import Evaluator
-import pandas as pd
 from decimal import Decimal
+
+import pandas as pd
 from tqdm import tqdm  # process bar
+
+from .evaluating_indicator import Evaluator
+from .. import PoolStatus
+from .._typing import AccountStatus, BarStatusNames, BaseAction, Asset, DemeterError, ActionTypeEnum, \
+    EvaluatingIndicator, RowData
+from ..broker import Broker, PoolBaseInfo
+from ..data_line import Lines
+from ..strategy import Strategy
 
 DEFAULT_DATA_PATH = "./data"
 
@@ -18,7 +20,7 @@ def decimal_from_value(value):
     return Decimal(value)
 
 
-class Runner(object):
+class Actuator(object):
     """
     Core component of a back test. Manage the resources in a test, including broker/strategy/data/indicator,
 
@@ -65,7 +67,7 @@ class Runner(object):
         if self.__backtest_finished:
             return self.account_status_list[len(self.account_status_list) - 1]
         else:
-            raise ZelosError("please run strategy first")
+            raise DemeterError("please run strategy first")
 
     def reset(self):
         """
@@ -255,7 +257,7 @@ class Runner(object):
         :param end_date: end test date
         :type end_date: date
         """
-        self.logger.info("start load files...")
+        self.logger.info(f"start load files from {start_date} to {end_date}...")
         df = pd.DataFrame()
         day = start_date
         while day <= end_date:
@@ -310,7 +312,7 @@ class Runner(object):
         """
         start back test, the whole process including:
 
-        * reset runner
+        * reset actuator
         * initialize strategy (set object to strategy, then run strategy.initialize())
         * process each bar in data
             * prepare data in each row
@@ -330,14 +332,14 @@ class Runner(object):
         self.logger.info("init strategy...")
         first_data = self._data.iloc[0]
         self._broker.pool_status = PoolStatus(self._data.index[0].to_pydatetime(),
-                                              first_data.closeTick,
+                                              int(first_data.closeTick),
                                               first_data.currentLiquidity,
                                               first_data.inAmount0,
                                               first_data.inAmount1,
                                               first_data.price)
         self.init_strategy()
         if not isinstance(self._data, Lines):
-            raise ZelosError("Data must be instance of Lines")
+            raise DemeterError("Data must be instance of Lines")
         row_id = 0
         first = True
         self.logger.info("start main loop...")
@@ -352,12 +354,16 @@ class Runner(object):
                 # execute strategy, and some calculate
                 # update price tick
                 self._broker.pool_status = PoolStatus(index.to_pydatetime(),
-                                                      row_data.closeTick,
+                                                      int(row_data.closeTick),
                                                       row_data.currentLiquidity,
                                                       row_data.inAmount0,
                                                       row_data.inAmount1,
                                                       row_data.price)
                 self._strategy.next(row_data)
+                if self._strategy.triggers:
+                    for trigger in self._strategy.triggers:
+                        if trigger.when(row_data):
+                            trigger.do(row_data)
                 # update broker status, eg: re-calculate fee
                 # and read the latest status from broker
                 self._broker.update()
@@ -404,14 +410,14 @@ class Runner(object):
             print("Evaluating indicator")
             print(self._evaluator.evaluating_indicator.get_output_str())
         else:
-            raise ZelosError("please run strategy first")
+            raise DemeterError("please run strategy first")
 
     def init_strategy(self):
         """
         initialize strategy, set property to strategy. and run strategy.initialize()
         """
         if not isinstance(self._strategy, Strategy):
-            raise ZelosError("strategy must be inherit from Strategy")
+            raise DemeterError("strategy must be inherit from Strategy")
         self._strategy.broker = self._broker
         self._strategy.data = self._data
 

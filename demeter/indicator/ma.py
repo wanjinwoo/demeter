@@ -1,53 +1,72 @@
-from pandas import Timedelta
+from datetime import timedelta
 
-from .._typing import ZelosError, DECIMAL_ZERO, TimeUnitEnum
+import numpy as np
 import pandas as pd
-from enum import Enum
-from decimal import Decimal
+from pandas._typing import TimedeltaConvertibleTypes, Axis
+
+from .common import get_real_n
 
 
-def simple_moving_average(data: pd.Series, n=5, unit=TimeUnitEnum.hour) -> pd.Series:
+def simple_moving_average(data: pd.Series | pd.DataFrame,
+                          window: timedelta = timedelta(hours=5),
+                          min_periods: int | None = None,
+                          center: bool = False,
+                          win_type: str | None = None,
+                          on: str | None = None,
+                          axis: Axis = 0,
+                          closed: str | None = None,
+                          method: str = "single",
+                          ) -> pd.Series:
     """
-    calculate simple moving average
+    calculate simple moving average, Note: window is based on time span
+
+    docs for other params, see https://pandas.pydata.org/pandas-docs/stable/reference/api/pandas.Series.rolling.html
 
     :param data: data
     :type data: Series
-    :param n: window width, should set along with unit, eg: 5 hour, 2 minute
-    :type n: int
-    :param unit: unit of n, can be minute,hour,day
-    :type unit: TimeUnitEnum
+    :param window: window width
+    :type window: timedelta
     :return: simple moving average data
     :rtype: Series
+
     """
-    if data.size < 2:
-        raise ZelosError("not enough data for simple_moving_average")
-    timespan: Timedelta = data.index[1] - data.index[0]
-    if timespan.seconds % 60 != 0:
-        return ZelosError("no seconds is allowed")
-    span_in_minute = timespan.total_seconds() / 60
-    if unit.value % span_in_minute != 0:
-        raise ZelosError(f"ma span is {n}{unit.name}, but data span is {span_in_minute}minute, cannot divide exactly")
-    real_n = n * int(unit.value / span_in_minute)
-    if data.size < real_n:
-        raise ZelosError("not enough data for simple_moving_average")
 
-    sum = Decimal(0)
+    return data.rolling(window=get_real_n(data, window),
+                        min_periods=min_periods,
+                        center=center,
+                        win_type=win_type,
+                        on=on,
+                        axis=axis,
+                        closed=closed,
+                        method=method,
+                        ).mean()
 
-    row_id = 0
 
-    sma_array = []
-    for index, value in data.iteritems():
-        if row_id < real_n - 1:
-            sma_array.append(DECIMAL_ZERO)
-            sum += value
-        elif row_id == real_n - 1:
-            sum += value
-            sma_array.append(sum / real_n)
-        else:
-            sum -= data.iloc[row_id - real_n]
-            sum += value
-            sma_array.append(sum / real_n)
+def exponential_moving_average(data: pd.Series | pd.DataFrame,
+                               com: float | None = None,
+                               span: float | None = None,
+                               halflife: float | TimedeltaConvertibleTypes | None = None,
+                               alpha: float | None = None,
+                               min_periods: int | None = 0,
+                               adjust: bool = True,
+                               ignore_na: bool = False,
+                               axis: Axis = 0,
+                               times: str | np.ndarray | pd.DataFrame | pd.Series | None = None,
+                               method: str = "single",
+                               ):
+    """
+    calculate exponential moving average, just a shortcut for pandas.evm().mean()
 
-        row_id += 1
-
-    return pd.Series(data=sma_array, index=data.index)
+    docs for params, see: https://pandas.pydata.org/pandas-docs/stable/reference/api/pandas.Series.ewm.html
+    """
+    return data.ewm(com=com,
+                    span=span,
+                    halflife=halflife,
+                    alpha=alpha,
+                    min_periods=min_periods,
+                    adjust=adjust,
+                    ignore_na=ignore_na,
+                    axis=axis,
+                    times=times,
+                    method=method,
+                    ).mean()

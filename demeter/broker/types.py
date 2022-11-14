@@ -1,8 +1,9 @@
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from typing import NamedTuple
-from datetime import datetime
-from .._typing import TokenInfo, ZelosError
+
+from .._typing import TokenInfo, DemeterError
 
 
 class PoolBaseInfo(object):
@@ -33,7 +34,7 @@ class PoolBaseInfo(object):
             case "1":
                 self.tickSpacing = 200
             case _:
-                raise ZelosError("fee should be 0.05 or 0.3 or 1")
+                raise DemeterError("fee should be 0.05 or 0.3 or 1")
         self.fee = Decimal(fee) * Decimal(10000)
         self.fee_rate = Decimal(fee) / Decimal(100)
 
@@ -84,7 +85,7 @@ class BrokerAsset(object):
         :return:
         :rtype:
         """
-        base = self.balance if self.balance != Decimal(0) else amount
+        base = self.balance if self.balance != Decimal(0) else Decimal(amount)
 
         if base == Decimal(0):  # amount and balance is both 0
             return self
@@ -93,7 +94,7 @@ class BrokerAsset(object):
         if abs((self.balance - amount) / base) < 0.00001:
             self.balance = Decimal(0)
         elif self.balance - amount < Decimal(0):
-            raise ZelosError(
+            raise DemeterError(
                 f"insufficient balance, balance is {self.balance}{self.name}, but sub amount is {amount}{self.name}")
         else:
             self.balance -= amount
@@ -109,14 +110,14 @@ class Position(object):
     variables for position
     """
 
-    def __init__(self):
-        self.uncollected_fee_token0: Decimal = Decimal(0)
-        self.uncollected_fee_token1: Decimal = Decimal(0)
+    pending_amount0: Decimal
+    pending_amount1: Decimal
+    liquidity: int
 
 
 class PoolStatus(NamedTuple):
     """
-    current status of a pool, runners can notify current status to broker by filling this entity
+    current status of a pool, actuators can notify current status to broker by filling this entity
     """
     timestamp: datetime
     current_tick: int

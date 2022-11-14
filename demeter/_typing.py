@@ -1,8 +1,8 @@
+from dataclasses import dataclass, field
+from datetime import datetime
+from decimal import Decimal
 from enum import Enum
 from typing import NamedTuple
-from decimal import Decimal
-from datetime import datetime
-from dataclasses import dataclass, field
 
 from .utils.application import get_formatted_str
 
@@ -45,9 +45,15 @@ class UnitDecimal(Decimal):
         obj.output_format: str = output_format if output_format is not None else UnitDecimal.default_output_format
         return obj
 
-    def __str__(self):
+    def to_str(self):
+        """
+        get formatted string of this decimal. format is defined in self.output_format and unit will be append.
+
+        :return: formatted string
+        :rtype: str
+        """
         dec = self.quantize(self.__integral) if self == self.to_integral() else self.normalize()
-        return "{:{}}{}".format(dec, self.output_format, self.unit)
+        return "{:{}} {}".format(dec, self.output_format, self.unit)
 
 
 class TokenInfo(NamedTuple):
@@ -101,22 +107,20 @@ class PositionInfo(NamedTuple):
     :type lower_tick: int
     :param upper_tick: upper tick
     :type upper_tick: int
-    :param liquidity: liquidity in position
-    :type liquidity: Decimal
+
     """
     lower_tick: int
     upper_tick: int
-    liquidity: Decimal
 
     def __str__(self):
-        return f"""tick:{self.lower_tick},{self.upper_tick}, liquidity:{format(self.liquidity, '.0f')}"""
+        return f"""tick:{self.lower_tick},{self.upper_tick}"""
 
 
 BarStatusNames = [
     "base_balance",
     "quote_balance",
-    "uncollect_fee_base",
-    "uncollect_fee_quote",
+    "base_uncollected",
+    "quote_uncollected",
     "base_in_position",
     "quote_in_position",
     "net_value",
@@ -135,10 +139,10 @@ class AccountStatus:
     :type base_balance: UnitDecimal
     :param quote_balance: balance of quote token
     :type quote_balance: UnitDecimal
-    :param uncollect_fee_base: base token uncollect fee in all the positions.
-    :type uncollect_fee_base: UnitDecimal
-    :param uncollect_fee_quote: quote token uncollect fee in all the positions.
-    :type uncollect_fee_quote: UnitDecimal
+    :param base_uncollected: base token uncollect fee in all the positions.
+    :type base_uncollected: UnitDecimal
+    :param quote_uncollected: quote token uncollect fee in all the positions.
+    :type quote_uncollected: UnitDecimal
     :param base_in_position: base token amount deposited in positions, calculated according to current price
     :type base_in_position: UnitDecimal
     :param quote_in_position: quote token amount deposited in positions, calculated according to current price
@@ -152,8 +156,8 @@ class AccountStatus:
     timestamp: datetime
     base_balance: UnitDecimal
     quote_balance: UnitDecimal
-    uncollect_fee_base: UnitDecimal
-    uncollect_fee_quote: UnitDecimal
+    base_uncollected: UnitDecimal
+    quote_uncollected: UnitDecimal
     base_in_position: UnitDecimal
     quote_in_position: UnitDecimal
     net_value: UnitDecimal
@@ -166,18 +170,18 @@ class AccountStatus:
         :rtype: str
         """
         return get_formatted_str({
-            "total capital": f"{str(self.net_value)}",
-            "balance": f"{str(self.base_balance)},{str(self.quote_balance)}",
-            "uncollect fee": f"{str(self.uncollect_fee_base)},{str(self.uncollect_fee_quote)}",
-            "in position amount": f"{str(self.base_in_position)},{str(self.quote_in_position)}"
+            "total capital": f"{self.net_value.to_str()}",
+            "balance": f"{self.base_balance.to_str()},{self.quote_balance.to_str()}",
+            "uncollect fee": f"{self.base_uncollected.to_str()},{self.quote_uncollected.to_str()}",
+            "in position amount": f"{self.base_in_position.to_str()},{self.quote_in_position.to_str()}"
         })
 
     def to_array(self):
         return [
             self.base_balance,
             self.quote_balance,
-            self.uncollect_fee_base,
-            self.uncollect_fee_quote,
+            self.base_uncollected,
+            self.quote_uncollected,
             self.base_in_position,
             self.quote_in_position,
             self.net_value,
@@ -270,6 +274,8 @@ class AddLiquidityAction(BaseAction):
     :type quote_amount_actual: UnitDecimal
     :param position: generated position
     :type position: PositionInfo
+    :param liquidity: liquidity added
+    :type liquidity: int
     """
     base_amount_max: UnitDecimal
     quote_amount_max: UnitDecimal
@@ -278,6 +284,7 @@ class AddLiquidityAction(BaseAction):
     base_amount_actual: UnitDecimal
     quote_amount_actual: UnitDecimal
     position: PositionInfo
+    liquidity: int
     action_type = ActionTypeEnum.add_liquidity
 
     def get_output_str(self) -> str:
@@ -288,10 +295,11 @@ class AddLiquidityAction(BaseAction):
         """
         return f"""\033[1;31m{"Add liquidity":<20}\033[0m""" + \
                get_formatted_str({
-                   "max amount": f"{str(self.base_amount_max)},{str(self.quote_amount_max)}",
-                   "price": f"{str(self.lower_quote_price)},{str(self.upper_quote_price)}",
+                   "max amount": f"{self.base_amount_max.to_str()},{self.quote_amount_max.to_str()}",
+                   "price": f"{self.lower_quote_price.to_str()},{self.upper_quote_price.to_str()}",
                    "position": self.position,
-                   "balance": f"{str(self.base_balance_after)}(-{str(self.base_amount_actual)}), {str(self.quote_balance_after)}(-{str(self.quote_amount_actual)})"
+                   "liquidity": self.liquidity,
+                   "balance": f"{self.base_balance_after.to_str()}(-{self.base_amount_actual.to_str()}), {self.quote_balance_after.to_str()}(-{self.quote_amount_actual.to_str()})"
                })
 
 
@@ -322,13 +330,14 @@ class CollectFeeAction(BaseAction):
         return f"""\033[1;33m{"Collect fee":<20}\033[0m""" + \
                get_formatted_str({
                    "position": self.position,
-                   "balance": f"{str(self.base_balance_after)}(+{str(self.base_amount)}), {str(self.quote_balance_after)}(+{str(self.quote_amount)})"
+                   "balance": f"{self.base_balance_after.to_str()}(+{self.base_amount.to_str()}), {self.quote_balance_after.to_str()}(+{self.quote_amount.to_str()})"
                })
 
 
 @dataclass
 class RemoveLiquidityAction(BaseAction):
     """
+    TODO: update
     remove position
 
     :param position: position to operate
@@ -337,11 +346,17 @@ class RemoveLiquidityAction(BaseAction):
     :type base_amount: UnitDecimal
     :param quote_amount: quote token amount collected
     :type quote_amount: UnitDecimal
+    :param removed_liquidity: liquidity number has removed
+    :type removed_liquidity: int
+    :param remain_liquidity: liquidity number left in position
+    :type remain_liquidity: int
 
     """
     position: PositionInfo
     base_amount: UnitDecimal
     quote_amount: UnitDecimal
+    removed_liquidity: int
+    remain_liquidity: int
     action_type = ActionTypeEnum.remove_liquidity
 
     def get_output_str(self) -> str:
@@ -353,7 +368,10 @@ class RemoveLiquidityAction(BaseAction):
         return f"""\033[1;32m{"Remove liquidity":<20}\033[0m""" + \
                get_formatted_str({
                    "position": self.position,
-                   "balance": f"{str(self.base_balance_after)}(+{str(self.base_amount)}), {str(self.quote_balance_after)}(+{str(self.quote_amount)})"
+                   "balance": f"{self.base_balance_after.to_str()}(+0), {self.quote_balance_after.to_str()}(+0)",
+                   "token_got": f"{self.base_amount.to_str()},{self.quote_amount.to_str()}",
+                   "removed liquidity": self.removed_liquidity,
+                   "remain liquidity": self.remain_liquidity
                })
 
 
@@ -389,9 +407,9 @@ class BuyAction(BaseAction):
         """
         return f"""\033[1;36m{"Buy":<20}\033[0m""" + \
                get_formatted_str({
-                   "price": str(self.price),
-                   "fee": str(self.fee),
-                   "balance": f"{str(self.base_balance_after)}(-{str(self.base_change)}), {str(self.quote_balance_after)}(+{str(self.quote_change)})"
+                   "price": self.price.to_str(),
+                   "fee": self.fee.to_str(),
+                   "balance": f"{self.base_balance_after.to_str()}(-{self.base_change.to_str()}), {self.quote_balance_after.to_str()}(+{self.quote_change.to_str()})"
                })
 
 
@@ -422,9 +440,9 @@ class SellAction(BaseAction):
     def get_output_str(self):
         return f"""\033[1;37m{"Sell":<20}\033[0m""" + \
                get_formatted_str({
-                   "price": str(self.price),
-                   "fee": str(self.fee),
-                   "balance": f"{str(self.base_balance_after)}(+{str(self.base_change)}), {str(self.quote_balance_after)}(-{str(self.quote_change)})"
+                   "price": self.price.to_str(),
+                   "fee": self.fee.to_str(),
+                   "balance": f"{self.base_balance_after.to_str()}(+{self.base_change.to_str()}), {self.quote_balance_after.to_str()}(-{self.quote_change.to_str()})"
                })
 
 
@@ -450,10 +468,10 @@ class EvaluatingIndicator:
         :rtype: str
         """
         return get_formatted_str({
-            "annualized_returns": str(self.annualized_returns),
-            "benchmark_returns": str(self.benchmark_returns),
+            "annualized_returns": self.annualized_returns.to_str(),
+            "benchmark_returns": self.benchmark_returns.to_str(),
         })
 
 
-class ZelosError(RuntimeError):
+class DemeterError(RuntimeError):
     pass
