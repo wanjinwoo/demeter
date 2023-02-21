@@ -1,4 +1,5 @@
 import logging
+import time
 from datetime import date, timedelta, datetime
 from decimal import Decimal
 
@@ -8,7 +9,7 @@ from tqdm import tqdm  # process bar
 from .evaluating_indicator import Evaluator
 from .. import PoolStatus
 from .._typing import AccountStatus, BarStatusNames, BaseAction, Asset, DemeterError, ActionTypeEnum, \
-    EvaluatingIndicator, RowData
+    RowData, EvaluatorEnum, UnitDecimal
 from ..broker import Broker, PoolBaseInfo
 from ..data_line import Lines
 from ..strategy import Strategy
@@ -29,8 +30,9 @@ class Actuator(object):
 
     """
 
-    def __init__(self, pool_info: PoolBaseInfo):
+    def __init__(self, pool_info: PoolBaseInfo, allow_negative_balance=False):
         self._broker: Broker = Broker(pool_info)
+        self._broker.allow_negative_balance = allow_negative_balance
         # data
         self._data: Lines = None
         # strategy
@@ -40,19 +42,26 @@ class Actuator(object):
         # actions in current bar
         self.bar_actions: [BaseAction] = []
         self._broker.action_buffer = self.bar_actions
-        # broker status in every bar
+        # broker status in every bar, use array for performance
         self.account_status_list: [AccountStatus] = []
         # path of source data, which is saved by downloader
         self._data_path: str = DEFAULT_DATA_PATH
         # evaluating indicator calculator
         self._evaluator: Evaluator = None
-
+        self._enabled_evaluator: [] = []
         # logging
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
         self.logger = logging.getLogger(__name__)
 
         # internal var
         self.__backtest_finished = False
+
+    @property
+    def account_status(self) -> pd.DataFrame:
+        index = self.data.index[0:len(self.account_status_list)]
+        return pd.DataFrame(columns=BarStatusNames,
+                            index=index,
+                            data=map(lambda d: d.to_array(), self.account_status_list))
 
     @property
     def final_status(self) -> AccountStatus:
@@ -110,14 +119,14 @@ class Actuator(object):
         return self._actions
 
     @property
-    def evaluating_indicator(self) -> EvaluatingIndicator:
+    def evaluating_indicator(self) -> dict[EvaluatorEnum:UnitDecimal]:
         """
         evaluating indicator result
 
         :return:  evaluating indicator
         :rtype: EvaluatingIndicator
         """
-        return self._evaluator.evaluating_indicator if self._evaluator is not None else None
+        return self._evaluator.result if self._evaluator is not None else None
 
     @property
     def broker(self) -> Broker:
@@ -281,7 +290,7 @@ class Actuator(object):
         df = df.fillna()
         self.add_statistic_column(df)
         self.data = df
-        self.logger.info("data has benn prepared")
+        self.logger.info("data has been prepared")
 
     def add_statistic_column(self, df: Lines):
         """
@@ -308,7 +317,7 @@ class Actuator(object):
         df["volume0"] = df["inAmount0"].map(lambda x: Decimal(x) / 10 ** self.broker.pool_info.token0.decimal)
         df["volume1"] = df["inAmount1"].map(lambda x: Decimal(x) / 10 ** self.broker.pool_info.token1.decimal)
 
-    def run(self, enable_notify=True):
+    def run(self, enable_notify=True, evaluator=[EvaluatorEnum.ALL], print_final_status=False):
         """
         start back test, the whole process including:
 
@@ -316,7 +325,7 @@ class Actuator(object):
         * initialize strategy (set object to strategy, then run strategy.initialize())
         * process each bar in data
             * prepare data in each row
-            * run strategy.next()
+            * run strategy.on_bar()
             * calculate fee earned
             * get latest account status
             * notify actions
@@ -325,7 +334,13 @@ class Actuator(object):
 
         :param enable_notify: notify when new action happens
         :type enable_notify: bool
+        :param enable_evaluating: enable evaluating indicator. if not enabled, no evaluating will be calculated
+        :type enable_evaluating: bool
+        :param print_final_status: enable output.
+        :type print_final_status: bool
         """
+        run_begin_time = time.time()
+        self._enabled_evaluator = evaluator
         self.reset()
         if self._data is None:
             return
@@ -359,14 +374,20 @@ class Actuator(object):
                                                       row_data.inAmount0,
                                                       row_data.inAmount1,
                                                       row_data.price)
-                self._strategy.next(row_data)
+                self._strategy.before_bar(row_data)
+
                 if self._strategy.triggers:
                     for trigger in self._strategy.triggers:
                         if trigger.when(row_data):
                             trigger.do(row_data)
+                self._strategy.on_bar(row_data)
+
                 # update broker status, eg: re-calculate fee
                 # and read the latest status from broker
                 self._broker.update()
+
+                self._strategy.after_bar(row_data)
+
                 if first:
                     init_price = row_data.price
                     first = False
@@ -380,7 +401,7 @@ class Actuator(object):
                 if current_event_list and len(current_event_list) > 0:
                     self._actions.extend(current_event_list)
 
-                # process next
+                # process on_bar
                 self._data.move_cursor_to_next()
                 pbar.update()
         # notify
@@ -392,13 +413,16 @@ class Actuator(object):
                                      index=self.data.index,
                                      data=map(lambda d: d.to_array(), self.account_status_list))
         self.logger.info("run evaluating indicator")
-        self._evaluator = Evaluator(
-            self._broker.get_init_account_status(init_price, self.data.index[0].to_pydatetime()),
-            bar_status_df)
-        self._evaluator.run()
+        if len(self._enabled_evaluator) > 0:
+            self._evaluator = Evaluator(
+                self._broker.get_init_account_status(init_price, self.data.index[0].to_pydatetime()),
+                bar_status_df)
+            self._evaluator.run(self._enabled_evaluator)
         self._strategy.finalize()
-        self.logger.info("back testing finish")
         self.__backtest_finished = True
+        if print_final_status:
+            self.output()
+        self.logger.info(f"back testing finish, execute time {time.time() - run_begin_time}s")
 
     def output(self):
         """
@@ -407,8 +431,9 @@ class Actuator(object):
         if self.__backtest_finished:
             print("Final status")
             print(self.broker.get_account_status(self.data.tail(1).price[0]).get_output_str())
-            print("Evaluating indicator")
-            print(self._evaluator.evaluating_indicator.get_output_str())
+            if len(self._enabled_evaluator) > 0:
+                print("Evaluating indicator")
+                print(self._evaluator.result)
         else:
             raise DemeterError("please run strategy first")
 
@@ -420,7 +445,7 @@ class Actuator(object):
             raise DemeterError("strategy must be inherit from Strategy")
         self._strategy.broker = self._broker
         self._strategy.data = self._data
-
+        self._strategy.account_status = self.account_status
         self._strategy.initialize()
 
     def __str__(self):

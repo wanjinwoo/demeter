@@ -2,7 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Union
 
-from .helper import tick_to_quote_price, quote_price_to_tick
+from .helper import tick_to_quote_price, quote_price_to_tick, quote_price_to_sqrt, tick_to_sqrtPriceX96
 from .liquitidymath import get_sqrt_ratio_at_tick
 from .types import PoolBaseInfo, TokenInfo, BrokerAsset, Position, PoolStatus
 from .v3_core import V3CoreLib
@@ -37,6 +37,7 @@ class Broker(object):
         self._price_unit = f"{self.base_asset.name}/{self.quote_asset.name}"
         # internal temporary variable
         self.action_buffer = []
+        self.allow_negative_balance = False
 
     def __str__(self):
         return f"Pool: {self.pool_info}, position count: {len(self.positions)}, " \
@@ -222,14 +223,15 @@ class Broker(object):
         base_asset, quote_asset = self.__convert_pair(self._asset0, self._asset1)
         base_fee_sum = DECIMAL_ZERO
         quote_fee_sum = DECIMAL_ZERO
-        tick = quote_price_to_tick(price, self.asset0.decimal, self.asset1.decimal, self._is_token0_base)
+        sqrt_price = quote_price_to_sqrt(price, self.asset0.decimal, self.asset1.decimal, self._is_token0_base)
         deposit_amount0 = deposit_amount1 = Decimal(0)
         for position_info, position in self._positions.items():
             base_fee, quote_fee = self.__convert_pair(position.pending_amount0,
                                                       position.pending_amount1)
             base_fee_sum += base_fee
             quote_fee_sum += quote_fee
-            amount0, amount1 = V3CoreLib.get_token_amounts(self._pool_info, position_info, tick, position.liquidity)
+            amount0, amount1 = V3CoreLib.get_token_amounts(self._pool_info, position_info, sqrt_price,
+                                                           position.liquidity)
             deposit_amount0 += amount0
             deposit_amount1 += amount1
 
@@ -297,14 +299,14 @@ class Broker(object):
             self._positions[position_info].liquidity += liquidity
         else:
             self._positions[position_info] = Position(DECIMAL_ZERO, DECIMAL_ZERO, liquidity)
-        self._asset0.sub(token0_used)
-        self._asset1.sub(token1_used)
+        self._asset0.sub(token0_used, self.allow_negative_balance)
+        self._asset1.sub(token1_used, self.allow_negative_balance)
         return position_info, token0_used, token1_used, liquidity
 
     def __remove_liquidity(self, position: PositionInfo, liquidity: int = None, sqrt_price_x96: int = -1):
         sqrt_price_x96 = int(sqrt_price_x96) if sqrt_price_x96 != -1 else get_sqrt_ratio_at_tick(
             self.pool_status.current_tick)
-        delta_liquidity = liquidity if liquidity and liquidity < self.positions[position].liquidity \
+        delta_liquidity = liquidity if (liquidity is not None) and liquidity < self.positions[position].liquidity \
             else self.positions[position].liquidity
         token0_get, token1_get = V3CoreLib.close_position(self._pool_info, position, delta_liquidity, sqrt_price_x96)
 
@@ -334,7 +336,8 @@ class Broker(object):
                       lower_quote_price: Union[Decimal, float],
                       upper_quote_price: Union[Decimal, float],
                       base_max_amount: Union[Decimal, float] = None,
-                      quote_max_amount: Union[Decimal, float] = None) -> (PositionInfo, Decimal, Decimal):
+                      quote_max_amount: Union[Decimal, float] = None,
+                      ) -> (PositionInfo, Decimal, Decimal):
         """
 
         add liquidity, then get a new position
@@ -379,7 +382,8 @@ class Broker(object):
                               upper_tick: int,
                               base_max_amount: Union[Decimal, float] = None,
                               quote_max_amount: Union[Decimal, float] = None,
-                              sqrt_price_x96: int = -1):
+                              sqrt_price_x96: int = -1,
+                              tick: int = -1):
         """
 
         add liquidity, you need to set tick instead of price.
@@ -392,11 +396,15 @@ class Broker(object):
         :type base_max_amount: Union[Decimal, float]
         :param quote_max_amount: inputted base token amount, also the max amount to deposit, if is None, will use all the balance of base token
         :type quote_max_amount: Union[Decimal, float]
-        :param sqrt_price_x96: precise price.  if set to none, it will be calculated from current price.
+        :param tick: tick price.  if set to none, it will be calculated from current price.
+        :type tick: int
+        :param sqrt_price_x96: precise price.  if set to none, it will be calculated from current price. this param will override tick
         :type sqrt_price_x96: int
         :return: added position, base token used, quote token used
         :rtype: (PositionInfo, Decimal, Decimal)
         """
+        if sqrt_price_x96 == -1 and tick != -1:
+            sqrt_price_x96 = tick_to_sqrtPriceX96(tick)
         base_max_amount = self.base_asset.balance if base_max_amount is None else base_max_amount
         quote_max_amount = self.quote_asset.balance if quote_max_amount is None else quote_max_amount
         token0_amt, token1_amt = self.__convert_pair(base_max_amount, quote_max_amount)
@@ -421,7 +429,7 @@ class Broker(object):
 
     @float_param_formatter
     def remove_liquidity(self, position: PositionInfo, liquidity: int = None, collect: bool = True,
-                         sqrt_price_x96: int = -1) -> (Decimal, Decimal):
+                         sqrt_price_x96: int = -1, remove_dry_pool: bool = True) -> (Decimal, Decimal):
         """
         remove liquidity from pool, liquidity will be reduced to 0,
         instead of send tokens to broker, tokens will be transferred to fee property in position.
@@ -435,6 +443,8 @@ class Broker(object):
         :type collect: bool
         :param sqrt_price_x96: precise price.  if set to none, it will be calculated from current price.
         :type sqrt_price_x96: int
+        :param remove_dry_pool: remove pool which liquidity==0, effect when collect==True
+        :type remove_dry_pool: bool
         :return: (base_got,quote_get), base and quote token amounts collected from position
         :rtype:  (Decimal,Decimal)
         """
@@ -454,7 +464,7 @@ class Broker(object):
                 remain_liquidity=self.positions[position].liquidity
             ))
         if collect:
-            return self.collect_fee(position)
+            return self.collect_fee(position, remove_dry_pool)
         else:
             return base_get, quote_get
 
@@ -462,7 +472,8 @@ class Broker(object):
     def collect_fee(self,
                     position: PositionInfo,
                     max_collect_amount0: Decimal = None,
-                    max_collect_amount1: Decimal = None) -> (Decimal, Decimal):
+                    max_collect_amount1: Decimal = None,
+                    remove_dry_pool: bool = True) -> (Decimal, Decimal):
         """
         collect fee and token from positions,
         if the amount and liquidity is zero, this position will be deleted.
@@ -473,13 +484,15 @@ class Broker(object):
         :type max_collect_amount0: Decimal
         :param max_collect_amount1: max token0 amount to collect, if set to None, all the amount will be collect
         :type max_collect_amount1: Decimal
+        :param remove_dry_pool: remove pool which liquidity==0, effect when collect==True
+        :type remove_dry_pool: bool
         :return: (base_got,quote_get), base and quote token amounts collected from position
         :rtype:  (Decimal,Decimal)
         """
         if (max_collect_amount0 and max_collect_amount0 < 0) or \
                 (max_collect_amount1 and max_collect_amount1 < 0):
             raise DemeterError("collect amount should large than 0")
-        token0_get, token1_get = self.__collect_fee(self._positions[position])
+        token0_get, token1_get = self.__collect_fee(self._positions[position], max_collect_amount0, max_collect_amount1)
 
         base_get, quote_get = self.__convert_pair(token0_get, token1_get)
         if self._positions[position]:
@@ -493,7 +506,8 @@ class Broker(object):
                 ))
         if self._positions[position].pending_amount0 == Decimal(0) \
                 and self._positions[position].pending_amount1 == Decimal(0) \
-                and self._positions[position].liquidity == 0:
+                and self._positions[position].liquidity == 0 \
+                and remove_dry_pool:
             del self.positions[position]
         return base_get, quote_get
 
@@ -514,7 +528,7 @@ class Broker(object):
         from_amount_with_fee = from_amount * (1 + self.pool_info.fee_rate)
         fee = from_amount_with_fee - from_amount
         from_asset, to_asset = self.__convert_pair(self._asset0, self._asset1)
-        from_asset.sub(from_amount_with_fee)
+        from_asset.sub(from_amount_with_fee, self.allow_negative_balance)
         to_asset.add(amount)
         base_amount, quote_amount = self.__convert_pair(from_amount, amount)
         self.action_buffer.append(
@@ -545,7 +559,7 @@ class Broker(object):
         to_amount = from_amount * price
         fee = from_amount_with_fee - from_amount
         to_asset, from_asset = self.__convert_pair(self._asset0, self._asset1)
-        from_asset.sub(from_amount_with_fee)
+        from_asset.sub(from_amount_with_fee, self.allow_negative_balance)
         to_asset.add(to_amount)
         base_amount, quote_amount = self.__convert_pair(to_amount, from_amount)
         self.action_buffer.append(

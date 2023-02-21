@@ -26,6 +26,8 @@ class V3CoreLib(object):
 
     @staticmethod
     def get_token_amounts(pool: PoolBaseInfo, pos: PositionInfo, sqrt_price_x96, liquidity) -> (Decimal, Decimal):
+        if liquidity == 0: # performance improve
+            return 0, 0
         amount0, amount1 = get_amounts(sqrt_price_x96,
                                        pos.lower_tick,
                                        pos.upper_tick,
@@ -44,7 +46,7 @@ class V3CoreLib(object):
 
     @staticmethod
     def update_fee(pool: PoolBaseInfo, pos: PositionInfo, position: Position, state: PoolStatus):
-        # in most cases, tick will not cross to next one, which means L will not change.
+        # in most cases, tick will not cross to on_bar one, which means L will not change.
         if pos.upper_tick > state.current_tick > pos.lower_tick:
             # if the simulating liquidity is above the actual liquidity, we will consider share=1
             if position.liquidity >= state.current_liquidity:
